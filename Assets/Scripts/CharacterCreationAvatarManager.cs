@@ -11,31 +11,35 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
     [Header("Spawn Points (Point0 master için tercih)")]
     public Transform[] spawnPoints;
 
-    // owner.ActorNumber -> PlayerAvatar
     Dictionary<int, PlayerAvatar> avatars = new Dictionary<int, PlayerAvatar>();
+    bool _spawnedMine = false;
 
     void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
     void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
 
     void Start()
     {
-        if (!PhotonNetwork.InRoom)
+        // InRoom garanti olana kadar bekle
+        StartCoroutine(WaitAndSpawnMine());
+    }
+
+    System.Collections.IEnumerator WaitAndSpawnMine()
+    {
+        while (!PhotonNetwork.InRoom) yield return null;
+
+        // kendi avatarýný spawnla (bir kere)
+        if (!_spawnedMine)
         {
-            Debug.LogError("Not in room.");
-            return;
+            int index = GetDeterministicSpawnIndex(PhotonNetwork.LocalPlayer);
+            var pt = GetSpawnPoint(index);
+            var go = PhotonNetwork.Instantiate("PhotonPrefabs/Player", pt.position, pt.rotation, 0);
+            var myAvatar = go.GetComponent<PlayerAvatar>();
+            avatars[PhotonNetwork.LocalPlayer.ActorNumber] = myAvatar;
+            myAvatar.ApplyGenderFromProperties();
+            _spawnedMine = true;
         }
 
-        // 1) KENDÝ avatarýný spawnla (her client sadece kendini instantiate eder)
-        int index = GetDeterministicSpawnIndex(PhotonNetwork.LocalPlayer);
-        var pt = GetSpawnPoint(index);
-        var go = PhotonNetwork.Instantiate("PhotonPrefabs/Player", pt.position, pt.rotation, 0);
-        var myAvatar = go.GetComponent<PlayerAvatar>();
-        avatars[PhotonNetwork.LocalPlayer.ActorNumber] = myAvatar;
-
-        // Ýlk cinsiyeti uygula
-        myAvatar.ApplyGenderFromProperties();
-
-        // 2) Geç gelenleri bir kez toparla
+        // sahnede var olanlarý toparla
         Invoke(nameof(RefreshAllAvatarsOnce), 0.2f);
     }
 
@@ -57,7 +61,6 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
     {
         if (spawnPoints == null || spawnPoints.Length == 0)
         {
-            Debug.LogWarning("SpawnPoints array empty. Using origin.");
             var go = new GameObject("TempSpawn");
             go.transform.position = Vector3.zero;
             return go.transform;
@@ -66,9 +69,6 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
         return spawnPoints[index];
     }
 
-    // === DETERMINISTIK SPAWN ===
-    // Master -> 0
-    // Diðerleri: Master harici oyuncularý ActorNumber'a göre sýrala -> index = 1 + sýra
     int GetDeterministicSpawnIndex(Player p)
     {
         if (PhotonNetwork.MasterClient == p) return 0;
@@ -81,14 +81,12 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
         int idx = others.FindIndex(x => x == p);
         int spawn = 1 + Mathf.Max(0, idx);
 
-        // Güvenlik: spawn point sayýsýný aþma
         if (spawnPoints != null && spawnPoints.Length > 0)
             spawn = Mathf.Clamp(spawn, 0, spawnPoints.Length - 1);
 
         return spawn;
     }
 
-    // --- Property güncellemede model senkronu ---
     public override void OnPlayerPropertiesUpdate(Player targetPlayer, Hashtable changedProps)
     {
         if (changedProps != null && changedProps.ContainsKey(NetKeys.PLAYER_GENDER))
@@ -96,19 +94,7 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
             if (avatars.TryGetValue(targetPlayer.ActorNumber, out var av))
                 av.ApplyGenderFromProperties();
             else
-            {
-                var all = FindObjectsOfType<PlayerAvatar>();
-                foreach (var a in all)
-                {
-                    var pv = a.GetComponent<PhotonView>();
-                    if (pv != null && pv.Owner == targetPlayer)
-                    {
-                        avatars[targetPlayer.ActorNumber] = a;
-                        a.ApplyGenderFromProperties();
-                        break;
-                    }
-                }
-            }
+                RefreshAllAvatarsOnce();
         }
 
         if (changedProps != null && changedProps.ContainsKey(NetKeys.ROOM_SHUTDOWN))
@@ -133,7 +119,6 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEven
 
     public override void OnMasterClientSwitched(Player newMasterClient)
     {
-        // Odayý kuran ayrýldýysa -> daðýt
         if (PhotonNetwork.CurrentRoom != null &&
             PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner) &&
             newMasterClient.UserId != (string)owner)

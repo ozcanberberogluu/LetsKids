@@ -38,7 +38,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 {
     public TMP_Text roomCodeText;
 
-    public TMP_InputField nameInput; // TMP
+    public TMP_InputField nameInput;
     public Button femaleBtn, maleBtn;
     public TMP_Text remainingPointsText;
 
@@ -49,14 +49,18 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     public Button readyBtn;
 
     [Header("Room Controls")]
-    public Button closeRoomBtn; // sadece odanýn kurucusunda (ve MasterClient) görünür
+    public Button closeRoomBtn;
 
     [Header("Game Start")]
-    public Button startGameBtn; // sadece owner görür, AllReady ise aktif
+    public Button startGameBtn;
 
     [Header("Others")]
     public Transform othersContent;
     public GameObject otherItemPrefab;
+
+    [Header("Saved Characters UI")]
+    public Transform savedListContent;
+    public GameObject savedCharacterItemPrefab;
 
     private int poolPoints = 10;
     private Stats localStats = new Stats();
@@ -64,37 +68,84 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
     private Dictionary<int, OtherItem> otherItems = new Dictionary<int, OtherItem>();
 
-    // Shutdown/sahne geçiþi korumalarý
     bool isLeaving = false;
     bool pendingLoad = false;
+
+    // saved/claim
+    SavedRoom _saved;
+    readonly List<SavedCharacterItem> _savedItems = new();
+
+    // Init bekçisi
+    bool _initialized = false;
+    Coroutine _waitJoinCo;
 
     void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
     void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
 
     void Start()
     {
-        roomCodeText.text = $"Oda: {PhotonNetwork.CurrentRoom.Name}";
+        // GECÝKMELÝ BAÞLATMA: InRoom deðilsek bekle
+        TryInit();
+    }
+
+    void TryInit()
+    {
+        if (_initialized) return;
+
+        if (PhotonNetwork.InRoom)
+        {
+            Init();
+        }
+        else
+        {
+            if (_waitJoinCo != null) StopCoroutine(_waitJoinCo);
+            _waitJoinCo = StartCoroutine(WaitUntilInRoom());
+        }
+    }
+
+    System.Collections.IEnumerator WaitUntilInRoom()
+    {
+        // bekle: baðlanýyor/joining olabilir
+        while (!PhotonNetwork.InRoom) yield return null;
+        Init();
+    }
+
+    void Init()
+    {
+        if (_initialized) return;
+        _initialized = true;
+
+        roomCodeText.text = PhotonNetwork.CurrentRoom != null
+            ? $"Oda: {PhotonNetwork.CurrentRoom.Name}"
+            : "Oda: ?";
 
         var p = PhotonNetwork.LocalPlayer;
 
-        // REJOIN/ÝLK GÝRÝÞ: her zaman resetle
+        // Reset state (rejoin dahil)
         gender = "M";
-        nameInput.text = p.NickName;     // varsayýlan olarak NickName
-        localStats = new Stats();        // base statlar
+        nameInput.text = p != null ? p.NickName : "";
+        localStats = new Stats();
         poolPoints = 10;
 
-        // herkes hazýr deðil baþlangýçta
         var htInit = new ExitGames.Client.Photon.Hashtable
         {
-            { NetKeys.PLAYER_READY, false }
+            { NetKeys.PLAYER_READY, false },
+            { NetKeys.PLAYER_SELECTED_CHAR, -1 }
         };
-        p.SetCustomProperties(htInit);
+        if (PhotonNetwork.InRoom) p.SetCustomProperties(htInit);
 
         HookUI();
-        PushProperties();     // resetlenmiþ deðerleri yayýnla
+        UpdateLocalUI();
+        PushProperties();
+
         RefreshOthersList();
         RefreshOwnerControls();
-        UpdateStartButton();  // start butonunu güncelle
+        UpdateStartButton();
+
+        // Saved snapshot varsa listele
+        LoadSavedSnapshotFromRoom();
+        RenderSavedList();
+        AutoClaimIfOwned();
     }
 
     void HookUI()
@@ -110,10 +161,9 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         atkspdPlus.onClick.AddListener(() => TryAdd(ref localStats.atkspd));
         hpPlus.onClick.AddListener(() => TryAdd(ref localStats.hp));
 
-        UpdateLocalUI();
-
         readyBtn.onClick.AddListener(() =>
         {
+            if (!PhotonNetwork.InRoom) return;
             PhotonNetwork.LocalPlayer.SetCustomProperties(
                 new ExitGames.Client.Photon.Hashtable { { NetKeys.PLAYER_READY, true } }
             );
@@ -128,10 +178,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
                 if (!IsOwner()) return;
                 if (!AllReady()) return;
 
-                // 1) Host: Saved Rooms'a kaydet
                 LocalRoomStorage.SaveCurrentRoomSnapshot();
-
-                // 2) Herkesi GameScene'e taþý
                 PhotonNetwork.LoadLevel("GameScene");
             });
         }
@@ -142,20 +189,15 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
             {
                 if (!IsOwner()) return;
 
-                // Event yayýnla (garanti)
                 PhotonNetwork.RaiseEvent(
-                    NetKeys.EVT_ROOM_SHUTDOWN,
-                    null,
+                    NetKeys.EVT_ROOM_SHUTDOWN, null,
                     new RaiseEventOptions { Receivers = ReceiverGroup.All },
-                    new SendOptions { Reliability = true }
-                );
+                    new SendOptions { Reliability = true });
 
-                // Property de set et (edge-case güvence)
-                PhotonNetwork.CurrentRoom.SetCustomProperties(
-                    new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_SHUTDOWN, true } }
-                );
+                if (PhotonNetwork.CurrentRoom != null)
+                    PhotonNetwork.CurrentRoom.SetCustomProperties(
+                        new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_SHUTDOWN, true } });
 
-                // Küçük gecikmeyle güvenli leave
                 if (!isLeaving) StartCoroutine(LeaveAfterDelay());
             });
         }
@@ -164,12 +206,11 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     System.Collections.IEnumerator LeaveAfterDelay()
     {
         isLeaving = true;
-        yield return null; // 1 frame
+        yield return null;
         yield return new WaitForSeconds(0.05f);
         GoToMainMenu();
     }
 
-    // Odayý kuran (owner) ve þu an MasterClient olan kiþi mi?
     bool IsOwner()
     {
         if (!PhotonNetwork.IsMasterClient) return false;
@@ -202,12 +243,12 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         atkspdText.text = localStats.atkspd.ToString();
         hpText.text = localStats.hp.ToString();
         remainingPointsText.text = $"Kalan Puan: {poolPoints}";
-        // Ready butonu sadece puanlar bitince aktif
         readyBtn.interactable = poolPoints == 0;
     }
 
     void PushProperties()
     {
+        if (!PhotonNetwork.InRoom) return; // <-- KRÝTÝK: InRoom deðilken çaðýrma
         var dict = localStats.ToDict();
         string json = MiniJson.Serialize(dict);
 
@@ -219,7 +260,6 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
     }
 
-    // === START butonu mantýðý ===
     bool AllReady()
     {
         return PhotonNetwork.PlayerList.All(pl =>
@@ -251,9 +291,8 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     public override void OnPlayerPropertiesUpdate(Player targetPlayer, ExitGames.Client.Photon.Hashtable changedProps)
     {
         if (otherItems.TryGetValue(targetPlayer.ActorNumber, out var oi))
-        {
             oi.Refresh(targetPlayer);
-        }
+
         if (changedProps != null && changedProps.ContainsKey(NetKeys.PLAYER_READY))
             UpdateStartButton();
     }
@@ -272,17 +311,163 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
     public override void OnMasterClientSwitched(Player newMasterClient)
     {
-        // Odayý kuran ayrýldýysa -> daðýt
         if (PhotonNetwork.CurrentRoom != null &&
             PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner) &&
             newMasterClient.UserId != (string)owner)
         {
             if (!isLeaving) GoToMainMenu();
         }
-        RefreshOwnerControls(); // Master deðiþtiyse owner görünürlüðünü güncelle
+        RefreshOwnerControls();
     }
 
-    // Event dinleyici (garanti daðýtým)
+    // ------- Saved Snapshot & Claim -------
+
+    void LoadSavedSnapshotFromRoom()
+    {
+        _saved = null;
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_SAVED_JSON, out var js) &&
+            js is string json && !string.IsNullOrEmpty(json))
+        {
+            _saved = LocalRoomStorage.FromJson(json);
+        }
+    }
+
+    void RenderSavedList()
+    {
+        if (savedListContent == null || savedCharacterItemPrefab == null) return;
+        foreach (Transform t in savedListContent) Destroy(t.gameObject);
+        _savedItems.Clear();
+
+        if (_saved == null || _saved.players == null) return;
+
+        for (int i = 0; i < _saved.players.Count; i++)
+        {
+            var sp = _saved.players[i];
+            var go = Instantiate(savedCharacterItemPrefab, savedListContent);
+            var ui = go.GetComponent<SavedCharacterItem>();
+            ui.Bind(sp, i, TryClaimCharacter);
+            _savedItems.Add(ui);
+        }
+
+        RefreshClaimsUI();
+    }
+
+    Dictionary<int, string> ReadClaims()
+    {
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_CLAIMS_JSON, out var js) &&
+            js is string json && !string.IsNullOrEmpty(json))
+        {
+            var d = MiniJson.Deserialize(json) as Dictionary<string, object>;
+            var map = new Dictionary<int, string>();
+            if (d != null)
+                foreach (var kv in d)
+                    if (int.TryParse(kv.Key, out var idx))
+                        map[idx] = kv.Value?.ToString();
+            return map;
+        }
+        return new Dictionary<int, string>();
+    }
+
+    string SerializeClaims(Dictionary<int, string> map)
+    {
+        var d = new Dictionary<string, object>();
+        foreach (var kv in map) d[kv.Key.ToString()] = kv.Value;
+        return MiniJson.Serialize(d);
+    }
+
+    void RefreshClaimsUI()
+    {
+        if (_saved == null) return;
+        var claims = ReadClaims();
+        for (int i = 0; i < _savedItems.Count; i++)
+        {
+            var ui = _savedItems[i];
+            if (!claims.TryGetValue(i, out var by) || string.IsNullOrEmpty(by))
+            {
+                ui.SetStateFree();
+            }
+            else
+            {
+                if (by == PhotonNetwork.LocalPlayer.UserId) ui.SetStateMine();
+                else
+                {
+                    string byName = "?";
+                    var sp = _saved.players.Find(p => p.userId == by);
+                    if (sp != null) byName = sp.name;
+                    ui.SetStateTaken(byName);
+                }
+            }
+        }
+    }
+
+    void AutoClaimIfOwned()
+    {
+        if (_saved == null) return;
+        int myIndex = _saved.players.FindIndex(p => p.userId == PhotonNetwork.LocalPlayer.UserId);
+        if (myIndex >= 0) TryClaimCharacter(myIndex);
+    }
+
+    void TryClaimCharacter(int index)
+    {
+        if (_saved == null || index < 0 || index >= _saved.players.Count) return;
+        var room = PhotonNetwork.CurrentRoom;
+        if (room == null) return;
+
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            object currentObj = null;
+            room.CustomProperties?.TryGetValue(NetKeys.ROOM_CLAIMS_JSON, out currentObj);
+
+            var claims = ReadClaims();
+
+            if (claims.TryGetValue(index, out var by) && !string.IsNullOrEmpty(by) && by != PhotonNetwork.LocalPlayer.UserId)
+            {
+                RefreshClaimsUI();
+                return;
+            }
+
+            int previous = -1;
+            foreach (var kv in claims)
+                if (kv.Value == PhotonNetwork.LocalPlayer.UserId) { previous = kv.Key; break; }
+            if (previous >= 0) claims.Remove(previous);
+
+            claims[index] = PhotonNetwork.LocalPlayer.UserId;
+            string newJson = SerializeClaims(claims);
+
+            var expected = new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_CLAIMS_JSON, currentObj } };
+            var set = new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_CLAIMS_JSON, newJson } };
+
+            bool success = room.SetCustomProperties(set, expected);
+            if (success)
+            {
+                PhotonNetwork.LocalPlayer.SetCustomProperties(
+                    new ExitGames.Client.Photon.Hashtable { { NetKeys.PLAYER_SELECTED_CHAR, index } }
+                );
+
+                var sp = _saved.players[index];
+                nameInput.text = sp.name;
+                gender = sp.gender == "F" ? "F" : "M";
+
+                var dict = MiniJson.Deserialize(sp.statsJson) as Dictionary<string, object>;
+                if (dict != null)
+                {
+                    localStats = Stats.FromDict(dict);
+                    poolPoints = 0;
+                    UpdateLocalUI();
+                }
+                PushProperties();
+                RefreshClaimsUI();
+                return;
+            }
+        }
+        RefreshClaimsUI();
+    }
+
+    // ----- Events / Shutdown -----
     public void OnEvent(EventData photonEvent)
     {
         if (photonEvent.Code == NetKeys.EVT_ROOM_SHUTDOWN)
@@ -293,6 +478,21 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     {
         if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_SHUTDOWN))
             GoToMainMenu();
+
+        if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_CLAIMS_JSON))
+            RefreshClaimsUI();
+
+        if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_SAVED_JSON))
+        {
+            LoadSavedSnapshotFromRoom();
+            RenderSavedList();
+        }
+    }
+
+    // Odaya sonradan girenler için: InRoom olunca tekrar Init denemesi
+    public override void OnJoinedRoom()
+    {
+        TryInit();
     }
 
     void GoToMainMenu()
@@ -300,14 +500,8 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         if (pendingLoad) return;
         pendingLoad = true;
 
-        if (PhotonNetwork.InRoom)
-        {
-            PhotonNetwork.LeaveRoom(); // sahneyi OnLeftRoom'da yükle
-        }
-        else
-        {
-            SceneManager.LoadScene("MainMenu");
-        }
+        if (PhotonNetwork.InRoom) PhotonNetwork.LeaveRoom();
+        else SceneManager.LoadScene("MainMenu");
     }
 
     public override void OnLeftRoom()

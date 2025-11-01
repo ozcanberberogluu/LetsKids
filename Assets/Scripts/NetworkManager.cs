@@ -2,8 +2,6 @@ using Photon.Pun;
 using Photon.Realtime;
 using UnityEngine;
 using UnityEngine.UI;
-using System;
-using ExitGames.Client.Photon;
 using TMPro;
 
 public class NetworkManager : MonoBehaviourPunCallbacks
@@ -17,110 +15,98 @@ public class NetworkManager : MonoBehaviourPunCallbacks
 
     void Start()
     {
-        PhotonNetwork.AutomaticallySyncScene = true;
+        connectBtn.onClick.AddListener(OnConnectClicked);
+        createRoomBtn.onClick.AddListener(OnCreateClicked);
+        joinRoomBtn.onClick.AddListener(OnJoinClicked);
 
-        connectBtn.onClick.AddListener(() =>
-        {
-            if (PhotonNetwork.IsConnected) return;
+        // Baþta butonlarý kilitle (yalnýzca Lobby'ye girince açýlacak)
+        SetRoomButtonsInteractable(false);
+    }
 
-            PhotonNetwork.NickName = string.IsNullOrWhiteSpace(nicknameInput.text)
-                ? $"Player_{UnityEngine.Random.Range(1000, 9999)}"
-                : nicknameInput.text.Trim();
+    void OnConnectClicked()
+    {
+        var nick = string.IsNullOrWhiteSpace(nicknameInput.text) ? $"Player{Random.Range(1000, 9999)}" : nicknameInput.text.Trim();
+        PhotonNetwork.NickName = nick;
 
+        if (!PhotonNetwork.IsConnected)
             PhotonNetwork.ConnectUsingSettings();
-        });
-
-        createRoomBtn.onClick.AddListener(CreateRoomFlow);
-        joinRoomBtn.onClick.AddListener(JoinRoomFlow);
-
-        ToggleLobbyControls(false);
+        else
+            PhotonNetwork.JoinLobby(); // zaten baðlýysa direkt lobiye
     }
 
-    void ToggleLobbyControls(bool on)
+    void OnCreateClicked()
     {
-        createRoomBtn.interactable = on;
-        joinRoomBtn.interactable = on;
+        // Güvenlik: sadece Lobby’deyken oda kur
+        if (!(PhotonNetwork.IsConnectedAndReady && PhotonNetwork.InLobby)) return;
+
+        string code = GenerateRoomCode(6);
+        RoomOptions opt = new RoomOptions { MaxPlayers = 8, PublishUserId = true };
+        PhotonNetwork.CreateRoom(code, opt, TypedLobby.Default);
     }
 
-    public override void OnConnectedToMaster()
+    void OnJoinClicked()
     {
-        ToggleLobbyControls(true);
-        PhotonNetwork.JoinLobby(); // opsiyonel
-    }
+        if (!(PhotonNetwork.IsConnectedAndReady && PhotonNetwork.InLobby)) return;
 
-    void CreateRoomFlow()
-    {
-        if (!PhotonNetwork.IsConnected) return;
-
-        string roomCode = GenerateRoomCode(6); // örn: A3F9KZ
-        var roomOptions = new RoomOptions
-        {
-            MaxPlayers = 8,
-            PublishUserId = true,
-            CleanupCacheOnLeave = true,
-            PlayerTtl = 0
-        };
-
-        var props = new Hashtable
-        {
-            { NetKeys.ROOM_CREATED_AT, DateTime.UtcNow.Ticks.ToString() },
-            { NetKeys.ROOM_OWNER_USERID, PhotonNetwork.LocalPlayer.UserId }
-        };
-        roomOptions.CustomRoomProperties = props;
-        roomOptions.CustomRoomPropertiesForLobby = new string[] { NetKeys.ROOM_CREATED_AT };
-
-        PhotonNetwork.CreateRoom(roomCode, roomOptions, TypedLobby.Default);
-    }
-
-    void JoinRoomFlow()
-    {
-        if (!PhotonNetwork.IsConnected) return;
-        string code = joinCodeInput.text.Trim().ToUpper();
+        var code = joinCodeInput.text?.Trim();
         if (string.IsNullOrEmpty(code)) return;
+
         PhotonNetwork.JoinRoom(code);
     }
 
     string GenerateRoomCode(int len)
     {
-        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        const string A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
         System.Text.StringBuilder sb = new System.Text.StringBuilder(len);
-        for (int i = 0; i < len; i++) sb.Append(chars[UnityEngine.Random.Range(0, chars.Length)]);
+        for (int i = 0; i < len; i++) sb.Append(A[Random.Range(0, A.Length)]);
         return sb.ToString();
+    }
+
+    void SetRoomButtonsInteractable(bool v)
+    {
+        if (createRoomBtn) createRoomBtn.interactable = v;
+        if (joinRoomBtn) joinRoomBtn.interactable = v;
+    }
+
+    // ===== PUN Callbacks =====
+    public override void OnConnectedToMaster()
+    {
+        PhotonNetwork.AutomaticallySyncScene = true;
+        PhotonNetwork.JoinLobby(); // Oda kur/katýl için þart
+    }
+
+    public override void OnJoinedLobby()
+    {
+        SetRoomButtonsInteractable(true);
+    }
+
+    public override void OnLeftLobby()
+    {
+        SetRoomButtonsInteractable(false);
     }
 
     public override void OnCreatedRoom()
     {
-        var ht = new Hashtable
+        // Owner bilgisini yaz (saved rooms için faydalý)
+        if (PhotonNetwork.CurrentRoom != null)
         {
-            { NetKeys.PLAYER_READY, false },
-            { NetKeys.PLAYER_GENDER, "M" },
-            { NetKeys.PLAYER_NAME, PhotonNetwork.NickName }
-        };
-        PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
+            var ht = new ExitGames.Client.Photon.Hashtable {
+                { NetKeys.ROOM_OWNER_USERID, PhotonNetwork.LocalPlayer.UserId },
+                { NetKeys.ROOM_CREATED_AT, System.DateTime.Now.Ticks }
+            };
+            PhotonNetwork.CurrentRoom.SetCustomProperties(ht);
+        }
     }
 
     public override void OnJoinedRoom()
     {
-        var ht = new Hashtable();
-        if (!PhotonNetwork.LocalPlayer.CustomProperties.ContainsKey(NetKeys.PLAYER_READY))
-            ht[NetKeys.PLAYER_READY] = false;
-        if (!PhotonNetwork.LocalPlayer.CustomProperties.ContainsKey(NetKeys.PLAYER_GENDER))
-            ht[NetKeys.PLAYER_GENDER] = "M";
-        if (!PhotonNetwork.LocalPlayer.CustomProperties.ContainsKey(NetKeys.PLAYER_NAME))
-            ht[NetKeys.PLAYER_NAME] = PhotonNetwork.NickName;
-
-        if (ht.Count > 0) PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
-
-        PhotonNetwork.LoadLevel("Lobby");
+        // CharacterCreation’a geç
+        PhotonNetwork.LoadLevel("CharacterCreation");
     }
 
-    public override void OnCreateRoomFailed(short returnCode, string message)
+    public override void OnLeftRoom()
     {
-        Debug.LogError($"CreateRoomFailed: {returnCode} {message}");
-    }
-
-    public override void OnJoinRoomFailed(short returnCode, string message)
-    {
-        Debug.LogError($"JoinRoomFailed: {returnCode} {message}");
+        // Oda kapandýktan sonra main menüde tekrar lobiye gir
+        if (PhotonNetwork.IsConnected) PhotonNetwork.JoinLobby();
     }
 }

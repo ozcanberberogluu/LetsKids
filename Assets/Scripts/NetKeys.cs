@@ -3,18 +3,19 @@ public static class NetKeys
     // Player Custom Properties
     public const string PLAYER_READY = "p_ready";
     public const string PLAYER_NAME = "p_name";
-    public const string PLAYER_GENDER = "p_gender"; // "F" / "M"
-    public const string PLAYER_STATS = "p_stats";  // string json, örn: {"spd":5,"pow":3,...}
+    public const string PLAYER_GENDER = "p_gender"; // "F"/"M"
+    public const string PLAYER_STATS = "p_stats";  // string json
+    public const string PLAYER_SELECTED_CHAR = "p_sel_char"; // int? (saved index), yoksa -1
 
     // Room Custom Properties
-    public const string ROOM_CREATED_AT = "r_created_at"; // ticks/string
-    public const string ROOM_OWNER_USERID = "r_owner";      // MasterClient UserId
+    public const string ROOM_CREATED_AT = "r_created_at";
+    public const string ROOM_OWNER_USERID = "r_owner";
+    public const string ROOM_SHUTDOWN = "r_shutdown";
 
-    // (önceden kullanmýþtýk, kalsýn zarar vermez)
-    public const string PLAYER_SLOT = "p_slot";
-    public const string ROOM_TAKEN_SLOTS = "r_taken";
+    // Saved room snapshot (JSON) ve claim tablosu (JSON: { "0":"userIdA","2":"userIdB", ... })
+    public const string ROOM_SAVED_JSON = "r_saved_json";
+    public const string ROOM_CLAIMS_JSON = "r_claims";
 
-    // YENÝ: Odayý kapatma sinyali
-    public const string ROOM_SHUTDOWN = "r_shutdown";   // bool true => oda kapat
+    // Events
     public const byte EVT_ROOM_SHUTDOWN = 1;
 }

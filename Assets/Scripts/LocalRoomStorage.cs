@@ -9,7 +9,7 @@ using UnityEngine;
 public class SavedRoom
 {
     public string roomCode;
-    public string createdAtLocal; // "Gün/Ay/Yýl saat"
+    public string createdAtLocal; // "dd/MM/yyyy HH:mm"
     public long createdAtTicks;
     public List<SavedPlayer> players = new List<SavedPlayer>();
 }
@@ -19,9 +19,9 @@ public class SavedPlayer
 {
     public string userId;
     public string nick;
-    public string name;     // PLAYER_NAME
-    public string gender;   // "M"/"F"
-    public string statsJson; // <-- Dictionary yerine JSON string
+    public string name;      // PLAYER_NAME
+    public string gender;    // "M"/"F"
+    public string statsJson; // Stats JSON
 }
 
 [Serializable]
@@ -60,32 +60,11 @@ public static class LocalRoomStorage
         }
 
         var list = LoadAll();
-        // son kayýt en baþa
-        list.items.Insert(0, sr);
-        // istersen limit koyabilirsin (örn 50)
+        list.items.Insert(0, sr); // en yeni en üstte
         SaveAll(list);
 #if UNITY_EDITOR
-        Debug.Log($"[LocalRoomStorage] Saved room {sr.roomCode} with {sr.players.Count} players -> {FilePath}");
+        Debug.Log($"[LocalRoomStorage] Saved room {sr.roomCode} ({sr.players.Count} players) -> {FilePath}");
 #endif
-    }
-
-    static string GetProp(Player p, string key, string def)
-    {
-        if (p.CustomProperties != null && p.CustomProperties.TryGetValue(key, out var v) && v != null)
-            return v.ToString();
-        return def;
-    }
-
-    static string GetStatsJson(Player p)
-    {
-        if (p.CustomProperties != null &&
-            p.CustomProperties.TryGetValue(NetKeys.PLAYER_STATS, out var st) &&
-            st is string json && !string.IsNullOrEmpty(json))
-        {
-            return json;
-        }
-        // fallback base statlar
-        return MiniJson.Serialize(new Stats().ToDict());
     }
 
     public static SavedRoomList LoadAll()
@@ -106,7 +85,7 @@ public static class LocalRoomStorage
         return new SavedRoomList();
     }
 
-    static void SaveAll(SavedRoomList list)
+    public static void SaveAll(SavedRoomList list)
     {
         try
         {
@@ -117,5 +96,26 @@ public static class LocalRoomStorage
         {
             Debug.LogWarning($"[LocalRoomStorage] Save failed: {e.Message}");
         }
+    }
+
+    public static string ToJson(SavedRoom sr) => JsonUtility.ToJson(sr);
+    public static SavedRoom FromJson(string json) => string.IsNullOrEmpty(json) ? null : JsonUtility.FromJson<SavedRoom>(json);
+
+    static string GetProp(Player p, string key, string def)
+    {
+        if (p.CustomProperties != null && p.CustomProperties.TryGetValue(key, out var v) && v != null)
+            return v.ToString();
+        return def;
+    }
+
+    static string GetStatsJson(Player p)
+    {
+        if (p.CustomProperties != null &&
+            p.CustomProperties.TryGetValue(NetKeys.PLAYER_STATS, out var st) &&
+            st is string json && !string.IsNullOrEmpty(json))
+        {
+            return json;
+        }
+        return MiniJson.Serialize(new Stats().ToDict()); // fallback
     }
 }
