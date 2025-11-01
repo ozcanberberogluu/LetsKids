@@ -49,7 +49,10 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     public Button readyBtn;
 
     [Header("Room Controls")]
-    public Button closeRoomBtn; // YENI: sadece odanýn kurucusunda (ve MasterClient) görünür
+    public Button closeRoomBtn; // sadece odanýn kurucusunda (ve MasterClient) görünür
+
+    [Header("Game Start")]
+    public Button startGameBtn; // sadece owner görür, AllReady ise aktif
 
     [Header("Others")]
     public Transform othersContent;
@@ -61,7 +64,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
     private Dictionary<int, OtherItem> otherItems = new Dictionary<int, OtherItem>();
 
-    // --- Shutdown akýþý korumasý ---
+    // Shutdown/sahne geçiþi korumalarý
     bool isLeaving = false;
     bool pendingLoad = false;
 
@@ -74,7 +77,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
         var p = PhotonNetwork.LocalPlayer;
 
-        // --- REJOIN/ÝLK GÝRÝÞ: her zaman resetle ---
+        // REJOIN/ÝLK GÝRÝÞ: her zaman resetle
         gender = "M";
         nameInput.text = p.NickName;     // varsayýlan olarak NickName
         localStats = new Stats();        // base statlar
@@ -90,7 +93,8 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         HookUI();
         PushProperties();     // resetlenmiþ deðerleri yayýnla
         RefreshOthersList();
-        RefreshOwnerControls(); // YENI: kapat butonu görünürlüðü
+        RefreshOwnerControls();
+        UpdateStartButton();  // start butonunu güncelle
     }
 
     void HookUI()
@@ -110,10 +114,27 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
         readyBtn.onClick.AddListener(() =>
         {
-            var ht = new ExitGames.Client.Photon.Hashtable { { NetKeys.PLAYER_READY, true } };
-            PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
+            PhotonNetwork.LocalPlayer.SetCustomProperties(
+                new ExitGames.Client.Photon.Hashtable { { NetKeys.PLAYER_READY, true } }
+            );
             readyBtn.interactable = false;
+            UpdateStartButton();
         });
+
+        if (startGameBtn != null)
+        {
+            startGameBtn.onClick.AddListener(() =>
+            {
+                if (!IsOwner()) return;
+                if (!AllReady()) return;
+
+                // 1) Host: Saved Rooms'a kaydet
+                LocalRoomStorage.SaveCurrentRoomSnapshot();
+
+                // 2) Herkesi GameScene'e taþý
+                PhotonNetwork.LoadLevel("GameScene");
+            });
+        }
 
         if (closeRoomBtn != null)
         {
@@ -121,6 +142,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
             {
                 if (!IsOwner()) return;
 
+                // Event yayýnla (garanti)
                 PhotonNetwork.RaiseEvent(
                     NetKeys.EVT_ROOM_SHUTDOWN,
                     null,
@@ -128,24 +150,24 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
                     new SendOptions { Reliability = true }
                 );
 
+                // Property de set et (edge-case güvence)
                 PhotonNetwork.CurrentRoom.SetCustomProperties(
                     new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_SHUTDOWN, true } }
                 );
 
+                // Küçük gecikmeyle güvenli leave
                 if (!isLeaving) StartCoroutine(LeaveAfterDelay());
             });
-
-            System.Collections.IEnumerator LeaveAfterDelay()
-            {
-                isLeaving = true;
-                yield return null;
-                yield return new WaitForSeconds(0.05f);
-                GoToMainMenu();
-            }
         }
     }
 
-    
+    System.Collections.IEnumerator LeaveAfterDelay()
+    {
+        isLeaving = true;
+        yield return null; // 1 frame
+        yield return new WaitForSeconds(0.05f);
+        GoToMainMenu();
+    }
 
     // Odayý kuran (owner) ve þu an MasterClient olan kiþi mi?
     bool IsOwner()
@@ -160,6 +182,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     {
         if (closeRoomBtn != null)
             closeRoomBtn.gameObject.SetActive(IsOwner());
+        UpdateStartButton();
     }
 
     void TryAdd(ref int statField)
@@ -179,7 +202,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         atkspdText.text = localStats.atkspd.ToString();
         hpText.text = localStats.hp.ToString();
         remainingPointsText.text = $"Kalan Puan: {poolPoints}";
-        // Ready butonu artýk sadece pool bittiðinde aktif
+        // Ready butonu sadece puanlar bitince aktif
         readyBtn.interactable = poolPoints == 0;
     }
 
@@ -194,6 +217,21 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
             { NetKeys.PLAYER_STATS, json }
         };
         PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
+    }
+
+    // === START butonu mantýðý ===
+    bool AllReady()
+    {
+        return PhotonNetwork.PlayerList.All(pl =>
+            pl.CustomProperties.TryGetValue(NetKeys.PLAYER_READY, out var v) && v is bool b && b);
+    }
+
+    void UpdateStartButton()
+    {
+        if (startGameBtn == null) return;
+        bool owner = IsOwner();
+        startGameBtn.gameObject.SetActive(owner);
+        startGameBtn.interactable = owner && AllReady();
     }
 
     void RefreshOthersList()
@@ -216,16 +254,20 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         {
             oi.Refresh(targetPlayer);
         }
+        if (changedProps != null && changedProps.ContainsKey(NetKeys.PLAYER_READY))
+            UpdateStartButton();
     }
 
     public override void OnPlayerEnteredRoom(Player newPlayer)
     {
         RefreshOthersList();
+        UpdateStartButton();
     }
 
     public override void OnPlayerLeftRoom(Player otherPlayer)
     {
         RefreshOthersList();
+        UpdateStartButton();
     }
 
     public override void OnMasterClientSwitched(Player newMasterClient)
