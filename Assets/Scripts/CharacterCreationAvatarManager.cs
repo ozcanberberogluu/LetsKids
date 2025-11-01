@@ -4,14 +4,18 @@ using UnityEngine;
 using ExitGames.Client.Photon;
 using System.Linq;
 using System.Collections.Generic;
+using UnityEngine.SceneManagement;
 
-public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
+public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks, IOnEventCallback
 {
-    [Header("Spawn Points (Point0 = Master)")]
+    [Header("Spawn Points (Point0 master için tercih)")]
     public Transform[] spawnPoints;
 
     // owner.ActorNumber -> PlayerAvatar
     Dictionary<int, PlayerAvatar> avatars = new Dictionary<int, PlayerAvatar>();
+
+    void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
+    void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
 
     void Start()
     {
@@ -22,7 +26,7 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
         }
 
         // 1) KENDÝ avatarýný spawnla (her client sadece kendini instantiate eder)
-        var index = GetSpawnIndexFor(PhotonNetwork.LocalPlayer);
+        int index = GetDeterministicSpawnIndex(PhotonNetwork.LocalPlayer);
         var pt = GetSpawnPoint(index);
         var go = PhotonNetwork.Instantiate("PhotonPrefabs/Player", pt.position, pt.rotation, 0);
         var myAvatar = go.GetComponent<PlayerAvatar>();
@@ -31,15 +35,12 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
         // Ýlk cinsiyeti uygula
         myAvatar.ApplyGenderFromProperties();
 
-        // 2) MEVCUT oyuncular için (remote) avatar referanslarýný topla (OnPlayerEnteredRoom tetiklenene kadar bekleyebilir)
-        //    PUN, instantiate edilen objeleri otomatik eþler. Start anýnda uzaktakiler henüz Dictionary'e ekli olmayabilir;
-        //    OnPhotonInstantiate veya küçük gecikmeyle çözülür. Bu yüzden aþaðýdaki "Geç gelenleri yakalama" yöntemi:
+        // 2) Geç gelenleri bir kez toparla
         Invoke(nameof(RefreshAllAvatarsOnce), 0.2f);
     }
 
     void RefreshAllAvatarsOnce()
     {
-        // Sahnedeki tüm PlayerAvatar’larý bul ve sözlüðe koy
         var all = FindObjectsOfType<PlayerAvatar>();
         foreach (var av in all)
         {
@@ -65,8 +66,10 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
         return spawnPoints[index];
     }
 
-    // MasterClient -> 0, diðerleri ActorNumber sýrasýna göre 1..n
-    int GetSpawnIndexFor(Player p)
+    // === DETERMINISTIK SPAWN ===
+    // Master -> 0
+    // Diðerleri: Master harici oyuncularý ActorNumber'a göre sýrala -> index = 1 + sýra
+    int GetDeterministicSpawnIndex(Player p)
     {
         if (PhotonNetwork.MasterClient == p) return 0;
 
@@ -74,38 +77,50 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
             .Where(x => x != PhotonNetwork.MasterClient)
             .OrderBy(x => x.ActorNumber)
             .ToList();
+
         int idx = others.FindIndex(x => x == p);
-        return 1 + Mathf.Max(0, idx); // 1'den baþlat
+        int spawn = 1 + Mathf.Max(0, idx);
+
+        // Güvenlik: spawn point sayýsýný aþma
+        if (spawnPoints != null && spawnPoints.Length > 0)
+            spawn = Mathf.Clamp(spawn, 0, spawnPoints.Length - 1);
+
+        return spawn;
     }
 
-    // Herhangi bir oyuncunun property’si deðiþtiðinde modelini güncelle
+    // --- Property güncellemede model senkronu ---
     public override void OnPlayerPropertiesUpdate(Player targetPlayer, Hashtable changedProps)
     {
-        if (changedProps == null || changedProps.Count == 0) return;
-        if (!changedProps.ContainsKey(NetKeys.PLAYER_GENDER)) return;
-
-        if (avatars.TryGetValue(targetPlayer.ActorNumber, out var av))
+        if (changedProps != null && changedProps.ContainsKey(NetKeys.PLAYER_GENDER))
         {
-            av.ApplyGenderFromProperties();
-        }
-        else
-        {
-            // Avatar henüz sözlükte yoksa sahneden bulmayý dene
-            var all = FindObjectsOfType<PlayerAvatar>();
-            foreach (var a in all)
+            if (avatars.TryGetValue(targetPlayer.ActorNumber, out var av))
+                av.ApplyGenderFromProperties();
+            else
             {
-                var pv = a.GetComponent<PhotonView>();
-                if (pv != null && pv.Owner == targetPlayer)
+                var all = FindObjectsOfType<PlayerAvatar>();
+                foreach (var a in all)
                 {
-                    avatars[targetPlayer.ActorNumber] = a;
-                    a.ApplyGenderFromProperties();
-                    break;
+                    var pv = a.GetComponent<PhotonView>();
+                    if (pv != null && pv.Owner == targetPlayer)
+                    {
+                        avatars[targetPlayer.ActorNumber] = a;
+                        a.ApplyGenderFromProperties();
+                        break;
+                    }
                 }
             }
         }
+
+        if (changedProps != null && changedProps.ContainsKey(NetKeys.ROOM_SHUTDOWN))
+            GoToMainMenu();
     }
 
-    // Yeni biri geldiðinde: kýsa süre sonra avatarlarý tazele (onun instantiate’i tamamlanýnca)
+    public override void OnRoomPropertiesUpdate(Hashtable propertiesThatChanged)
+    {
+        if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_SHUTDOWN))
+            GoToMainMenu();
+    }
+
     public override void OnPlayerEnteredRoom(Player newPlayer)
     {
         Invoke(nameof(RefreshAllAvatarsOnce), 0.2f);
@@ -114,6 +129,28 @@ public class CharacterCreationAvatarManager : MonoBehaviourPunCallbacks
     public override void OnPlayerLeftRoom(Player otherPlayer)
     {
         avatars.Remove(otherPlayer.ActorNumber);
-        // (Ýsteðe baðlý) Sahnede onun Player objesi otomatik temizlenir (CleanupCacheOnLeave true ise)
+    }
+
+    public override void OnMasterClientSwitched(Player newMasterClient)
+    {
+        // Odayý kuran ayrýldýysa -> daðýt
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner) &&
+            newMasterClient.UserId != (string)owner)
+        {
+            GoToMainMenu();
+        }
+    }
+
+    public void OnEvent(EventData photonEvent)
+    {
+        if (photonEvent.Code == NetKeys.EVT_ROOM_SHUTDOWN)
+            GoToMainMenu();
+    }
+
+    void GoToMainMenu()
+    {
+        PhotonNetwork.LeaveRoom();
+        SceneManager.LoadScene("MainMenu");
     }
 }

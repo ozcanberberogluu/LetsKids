@@ -1,4 +1,4 @@
-using Photon.Pun;
+﻿using Photon.Pun;
 using Photon.Realtime;
 using UnityEngine;
 using UnityEngine.UI;
@@ -6,8 +6,9 @@ using ExitGames.Client.Photon;
 using System.Linq;
 using System.Collections.Generic;
 using TMPro;
+using UnityEngine.SceneManagement;
 
-public class LobbyUI : MonoBehaviourPunCallbacks
+public class LobbyUI : MonoBehaviourPunCallbacks, IOnEventCallback
 {
     public Transform playerListContent;
     public GameObject playerListItemPrefab;
@@ -16,15 +17,26 @@ public class LobbyUI : MonoBehaviourPunCallbacks
     public TMP_Text roomCodeText;
     public TMP_Text statusText;
 
+    public Button closeRoomBtn; // sadece owner görür
+
     Dictionary<int, PlayerListItem> items = new Dictionary<int, PlayerListItem>();
+    bool isLeaving = false; // tekrar leave'i engelle
+    bool pendingLoad = false;
+
+    void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
+    void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
 
     void Start()
     {
-        roomCodeText.text = $"Oda Numaras�: {PhotonNetwork.CurrentRoom.Name}";
+        roomCodeText.text = $"Oda Numarası: {PhotonNetwork.CurrentRoom.Name}";
         RefreshPlayerList();
         readyBtn.onClick.AddListener(ToggleReady);
         startBtn.onClick.AddListener(StartGame);
-        UpdateStartButton();
+
+        if (closeRoomBtn != null)
+            closeRoomBtn.onClick.AddListener(CloseRoom);
+
+        UpdateButtons();
     }
 
     void RefreshPlayerList()
@@ -53,8 +65,37 @@ public class LobbyUI : MonoBehaviourPunCallbacks
     {
         if (!PhotonNetwork.IsMasterClient) return;
         if (!AllReady()) return;
-
         PhotonNetwork.LoadLevel("CharacterCreation");
+    }
+
+    // === Odayı kapat ===
+    void CloseRoom()
+    {
+        if (!PhotonNetwork.IsMasterClient) return;
+
+        // 1) Olayı yayınla (herkes kendi kendine LeaveRoom + MainMenu yapacak)
+        PhotonNetwork.RaiseEvent(
+            NetKeys.EVT_ROOM_SHUTDOWN,
+            null,
+            new RaiseEventOptions { Receivers = ReceiverGroup.All },
+            new SendOptions { Reliability = true }
+        );
+
+        // 2) Property de set et (edge-case güvence)
+        PhotonNetwork.CurrentRoom.SetCustomProperties(
+            new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_SHUTDOWN, true } }
+        );
+
+        // 3) Minik gecikme sonra güvenli çıkış
+        if (!isLeaving) StartCoroutine(LeaveAfterDelay());
+    }
+
+    System.Collections.IEnumerator LeaveAfterDelay()
+    {
+        isLeaving = true;
+        yield return null; // 1 frame
+        yield return new WaitForSeconds(0.05f);
+        GoToMainMenu();
     }
 
     bool AllReady()
@@ -63,23 +104,84 @@ public class LobbyUI : MonoBehaviourPunCallbacks
             pl.CustomProperties.TryGetValue(NetKeys.PLAYER_READY, out var v) && v is bool b && b);
     }
 
-    void UpdateStartButton()
+    void UpdateButtons()
     {
         startBtn.gameObject.SetActive(PhotonNetwork.IsMasterClient);
         startBtn.interactable = PhotonNetwork.IsMasterClient && AllReady();
-        statusText.text = AllReady() ? "T�m oyuncular haz�r." : "Haz�r olmayanlar var.";
+
+        bool isOwner = false;
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner))
+        {
+            isOwner = PhotonNetwork.IsMasterClient && PhotonNetwork.LocalPlayer.UserId == (string)owner;
+        }
+        if (closeRoomBtn != null) closeRoomBtn.gameObject.SetActive(isOwner);
+
+        statusText.text = AllReady() ? "Tüm oyuncular hazır." : "Hazır olmayanlar var.";
     }
+
+    // --------- Events ----------
+    public override void OnRoomPropertiesUpdate(Hashtable propertiesThatChanged)
+    {
+        if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_SHUTDOWN))
+            GoToMainMenu();
+    }
+
+
+    public override void OnMasterClientSwitched(Player newMasterClient)
+    {
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner) &&
+            newMasterClient.UserId != (string)owner)
+        {
+            GoToMainMenu();
+            return;
+        }
+        UpdateButtons();
+    }
+
+
+    public void OnEvent(EventData photonEvent)
+    {
+        if (photonEvent.Code == NetKeys.EVT_ROOM_SHUTDOWN)
+        {
+            GoToMainMenu(); // hepsi burada toplanıyor
+        }
+    }
+
+    void GoToMainMenu()
+    {
+        if (pendingLoad) return;
+        pendingLoad = true;
+
+        if (PhotonNetwork.InRoom)
+        {
+            PhotonNetwork.LeaveRoom(); // sahne değişimini OnLeftRoom’da yap
+        }
+        else
+        {
+            SceneManager.LoadScene("MainMenu");
+        }
+    }
+
+    public override void OnLeftRoom()
+    {
+        // Buraya mutlaka düşer → güvenli sahne yükleme
+        SceneManager.LoadScene("MainMenu");
+    }
+
 
     public override void OnPlayerEnteredRoom(Player newPlayer)
     {
         RefreshPlayerList();
-        UpdateStartButton();
+        UpdateButtons();
     }
 
     public override void OnPlayerLeftRoom(Player otherPlayer)
     {
         RefreshPlayerList();
-        UpdateStartButton();
+        UpdateButtons();
     }
 
     public override void OnPlayerPropertiesUpdate(Player targetPlayer, ExitGames.Client.Photon.Hashtable changedProps)
@@ -88,11 +190,6 @@ public class LobbyUI : MonoBehaviourPunCallbacks
         {
             item.Refresh(targetPlayer);
         }
-        UpdateStartButton();
-    }
-
-    public override void OnMasterClientSwitched(Player newMasterClient)
-    {
-        UpdateStartButton();
+        UpdateButtons();
     }
 }

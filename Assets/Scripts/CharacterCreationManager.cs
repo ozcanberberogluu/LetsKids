@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System;
 using TMPro;
+using UnityEngine.SceneManagement;
 
 [Serializable]
 public class Stats
@@ -33,17 +34,22 @@ public class Stats
     }
 }
 
-public class CharacterCreationManager : MonoBehaviourPunCallbacks
+public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallback
 {
     public TMP_Text roomCodeText;
 
-    public TMP_InputField nameInput; // TMP'ye çevrildi
+    public TMP_InputField nameInput; // TMP
     public Button femaleBtn, maleBtn;
     public TMP_Text remainingPointsText;
 
     [Header("Stat UI")]
     public TMP_Text spdText, powText, defText, atkspdText, hpText;
     public Button spdPlus, powPlus, defPlus, atkspdPlus, hpPlus;
+
+    public Button readyBtn;
+
+    [Header("Room Controls")]
+    public Button closeRoomBtn; // YENI: sadece odanýn kurucusunda (ve MasterClient) görünür
 
     [Header("Others")]
     public Transform othersContent;
@@ -55,24 +61,36 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks
 
     private Dictionary<int, OtherItem> otherItems = new Dictionary<int, OtherItem>();
 
+    // --- Shutdown akýþý korumasý ---
+    bool isLeaving = false;
+    bool pendingLoad = false;
+
+    void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
+    void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
+
     void Start()
     {
         roomCodeText.text = $"Oda: {PhotonNetwork.CurrentRoom.Name}";
 
         var p = PhotonNetwork.LocalPlayer;
 
-        if (p.CustomProperties.TryGetValue(NetKeys.PLAYER_GENDER, out var g)) gender = g.ToString();
-        if (p.CustomProperties.TryGetValue(NetKeys.PLAYER_NAME, out var nm)) nameInput.text = nm.ToString();
+        // --- REJOIN/ÝLK GÝRÝÞ: her zaman resetle ---
+        gender = "M";
+        nameInput.text = p.NickName;     // varsayýlan olarak NickName
+        localStats = new Stats();        // base statlar
+        poolPoints = 10;
 
-        if (p.CustomProperties.TryGetValue(NetKeys.PLAYER_STATS, out var st) && st is string json && !string.IsNullOrEmpty(json))
+        // herkes hazýr deðil baþlangýçta
+        var htInit = new ExitGames.Client.Photon.Hashtable
         {
-            var dict = MiniJson.Deserialize(json) as Dictionary<string, object>;
-            localStats = Stats.FromDict(dict);
-        }
+            { NetKeys.PLAYER_READY, false }
+        };
+        p.SetCustomProperties(htInit);
 
         HookUI();
-        PushProperties();
+        PushProperties();     // resetlenmiþ deðerleri yayýnla
         RefreshOthersList();
+        RefreshOwnerControls(); // YENI: kapat butonu görünürlüðü
     }
 
     void HookUI()
@@ -89,6 +107,59 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks
         hpPlus.onClick.AddListener(() => TryAdd(ref localStats.hp));
 
         UpdateLocalUI();
+
+        readyBtn.onClick.AddListener(() =>
+        {
+            var ht = new ExitGames.Client.Photon.Hashtable { { NetKeys.PLAYER_READY, true } };
+            PhotonNetwork.LocalPlayer.SetCustomProperties(ht);
+            readyBtn.interactable = false;
+        });
+
+        if (closeRoomBtn != null)
+        {
+            closeRoomBtn.onClick.AddListener(() =>
+            {
+                if (!IsOwner()) return;
+
+                PhotonNetwork.RaiseEvent(
+                    NetKeys.EVT_ROOM_SHUTDOWN,
+                    null,
+                    new RaiseEventOptions { Receivers = ReceiverGroup.All },
+                    new SendOptions { Reliability = true }
+                );
+
+                PhotonNetwork.CurrentRoom.SetCustomProperties(
+                    new ExitGames.Client.Photon.Hashtable { { NetKeys.ROOM_SHUTDOWN, true } }
+                );
+
+                if (!isLeaving) StartCoroutine(LeaveAfterDelay());
+            });
+
+            System.Collections.IEnumerator LeaveAfterDelay()
+            {
+                isLeaving = true;
+                yield return null;
+                yield return new WaitForSeconds(0.05f);
+                GoToMainMenu();
+            }
+        }
+    }
+
+    
+
+    // Odayý kuran (owner) ve þu an MasterClient olan kiþi mi?
+    bool IsOwner()
+    {
+        if (!PhotonNetwork.IsMasterClient) return false;
+        if (PhotonNetwork.CurrentRoom == null) return false;
+        if (!PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner)) return false;
+        return PhotonNetwork.LocalPlayer.UserId == (string)owner;
+    }
+
+    void RefreshOwnerControls()
+    {
+        if (closeRoomBtn != null)
+            closeRoomBtn.gameObject.SetActive(IsOwner());
     }
 
     void TryAdd(ref int statField)
@@ -108,6 +179,8 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks
         atkspdText.text = localStats.atkspd.ToString();
         hpText.text = localStats.hp.ToString();
         remainingPointsText.text = $"Kalan Puan: {poolPoints}";
+        // Ready butonu artýk sadece pool bittiðinde aktif
+        readyBtn.interactable = poolPoints == 0;
     }
 
     void PushProperties()
@@ -153,5 +226,50 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks
     public override void OnPlayerLeftRoom(Player otherPlayer)
     {
         RefreshOthersList();
+    }
+
+    public override void OnMasterClientSwitched(Player newMasterClient)
+    {
+        // Odayý kuran ayrýldýysa -> daðýt
+        if (PhotonNetwork.CurrentRoom != null &&
+            PhotonNetwork.CurrentRoom.CustomProperties.TryGetValue(NetKeys.ROOM_OWNER_USERID, out var owner) &&
+            newMasterClient.UserId != (string)owner)
+        {
+            if (!isLeaving) GoToMainMenu();
+        }
+        RefreshOwnerControls(); // Master deðiþtiyse owner görünürlüðünü güncelle
+    }
+
+    // Event dinleyici (garanti daðýtým)
+    public void OnEvent(EventData photonEvent)
+    {
+        if (photonEvent.Code == NetKeys.EVT_ROOM_SHUTDOWN)
+            GoToMainMenu();
+    }
+
+    public override void OnRoomPropertiesUpdate(Hashtable propertiesThatChanged)
+    {
+        if (propertiesThatChanged != null && propertiesThatChanged.ContainsKey(NetKeys.ROOM_SHUTDOWN))
+            GoToMainMenu();
+    }
+
+    void GoToMainMenu()
+    {
+        if (pendingLoad) return;
+        pendingLoad = true;
+
+        if (PhotonNetwork.InRoom)
+        {
+            PhotonNetwork.LeaveRoom(); // sahneyi OnLeftRoom'da yükle
+        }
+        else
+        {
+            SceneManager.LoadScene("MainMenu");
+        }
+    }
+
+    public override void OnLeftRoom()
+    {
+        SceneManager.LoadScene("MainMenu");
     }
 }
