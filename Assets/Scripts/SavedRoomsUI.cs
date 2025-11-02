@@ -9,22 +9,22 @@ using System.Collections.Generic;
 public class SavedRoomsUI : MonoBehaviourPunCallbacks
 {
     [Header("Panel")]
-    public GameObject panelRoot;        // Kayýtlý Odalar paneli (SetActive false/true)
-    public Transform listContent;       // Scroll/Content (Vertical Layout)
-    public GameObject itemPrefab;       // SavedRoomItemUI prefab
+    public GameObject panelRoot;
+    public Transform listContent;
+    public GameObject itemPrefab;
 
     [Header("Controls")]
-    public Button openBtn;              // "Kayýtlý Odalar" butonu (panel toggle)
-    public Button startBtn;             // "Baþlat" (seçili kayýttan oda kur)
-    public Button closeBtn;             // paneli kapat
-    public Button removeBtn;            // seçili kaydý sil
-    public TMP_Text infoText;           // seçili bilgi yazýsý
+    public Button openBtn;
+    public Button startBtn;
+    public Button closeBtn;
+    public Button removeBtn;
+    public Button removeAllBtn;   // YENÝ: tüm kayýtlarý sil
+    public TMP_Text infoText;
 
     SavedRoomList _list;
     int _selectedIndex = -1;
     readonly List<SavedRoomItemUI> _spawned = new();
 
-    // pending create state
     bool _pendingCreateFromSaved = false;
     SavedRoom _pendingData = null;
 
@@ -34,15 +34,13 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
         if (startBtn) startBtn.onClick.AddListener(StartSelected);
         if (closeBtn) closeBtn.onClick.AddListener(() => { if (panelRoot) panelRoot.SetActive(false); });
         if (removeBtn) removeBtn.onClick.AddListener(RemoveSelected);
+        if (removeAllBtn) removeAllBtn.onClick.AddListener(RemoveAll); // YENÝ
 
         if (panelRoot) panelRoot.SetActive(false);
         Refresh();
-
-        // Baþlangýçta Saved Rooms butonunu da lobby durumuna göre kilitle
         UpdateOpenBtnState();
     }
 
-    // === UI ===
     void TogglePanel()
     {
         if (!panelRoot) return;
@@ -78,12 +76,16 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
 
     void UpdateButtons()
     {
-        if (startBtn) startBtn.interactable = (_selectedIndex >= 0);
-        if (removeBtn) removeBtn.interactable = (_selectedIndex >= 0);
+        bool hasSelection = _selectedIndex >= 0;
+        bool hasAny = _list != null && _list.items.Count > 0;
+
+        if (startBtn) startBtn.interactable = hasSelection;
+        if (removeBtn) removeBtn.interactable = hasSelection;
+        if (removeAllBtn) removeAllBtn.interactable = hasAny;
 
         if (infoText)
         {
-            if (_selectedIndex < 0) infoText.text = "Bir kayýt seçin.";
+            if (!hasSelection) infoText.text = "Bir kayýt seçin.";
             else
             {
                 var r = _list.items[_selectedIndex];
@@ -95,7 +97,6 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
     void UpdateOpenBtnState()
     {
         if (!openBtn) return;
-        // Sadece Lobby’deyken açýlabilir olsun (Connect'e basýlmadan týklanamasýn)
         openBtn.interactable = PhotonNetwork.IsConnectedAndReady && PhotonNetwork.InLobby;
     }
 
@@ -107,7 +108,13 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
         Refresh();
     }
 
-    // === Saved'den oda kurma ===
+    // YENÝ: tüm kayýtlarý sil
+    void RemoveAll()
+    {
+        LocalRoomStorage.ClearAll(true); // tüm kalýntýlarý temizle
+        Refresh();
+    }
+
     void StartSelected()
     {
         if (_selectedIndex < 0) return;
@@ -116,28 +123,25 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
         _pendingCreateFromSaved = true;
         _pendingData = data;
 
-        // Doðru duruma gel (Master + Lobby + odada deðil)
         if (PhotonNetwork.InRoom)
         {
             PhotonNetwork.LeaveRoom();
-            return; // OnLeftRoom -> ContinuePending()
+            return;
         }
 
         if (!PhotonNetwork.IsConnected)
         {
             PhotonNetwork.ConnectUsingSettings();
-            return; // OnConnectedToMaster -> (NetworkManager zaten JoinLobby yapýyor)
+            return;
         }
 
         if (!PhotonNetwork.InLobby)
         {
-            // Yalnýzca gerçekten lobby'de deðilsek dene (JoiningLobby spam'ini engeller)
             if (PhotonNetwork.NetworkClientState != ClientState.JoiningLobby)
                 PhotonNetwork.JoinLobby();
-            return; // OnJoinedLobby -> ContinuePending()
+            return;
         }
 
-        // Zaten hazýr durumdaysak direkt oluþtur
         ContinuePending();
     }
 
@@ -148,23 +152,33 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
 
         var data = _pendingData;
 
+        // KAYDIN saveId'si yoksa bir kere üret ve yerel dosyada güncelle
+        if (string.IsNullOrEmpty(data.saveId))
+        {
+            data.saveId = System.Guid.NewGuid().ToString("N");
+            // liste içinde bul ve güncelle
+            var all = LocalRoomStorage.LoadAll();
+            int idx = all.items.FindIndex(x => x != null && x.roomCode == data.roomCode && (x.saveId == null || x.saveId == ""));
+            if (idx >= 0) { all.items[idx].saveId = data.saveId; LocalRoomStorage.SaveAll(all); }
+        }
+
         var options = new RoomOptions
         {
             MaxPlayers = 8,
             PublishUserId = true,
-            CustomRoomProperties = new Hashtable {
-                { NetKeys.ROOM_OWNER_USERID, PhotonNetwork.LocalPlayer.UserId },
-                { NetKeys.ROOM_CREATED_AT, System.DateTime.Now.Ticks },
-                { NetKeys.ROOM_SAVED_JSON, LocalRoomStorage.ToJson(data) },
-                { NetKeys.ROOM_CLAIMS_JSON, "" }
-            },
+            CustomRoomProperties = new ExitGames.Client.Photon.Hashtable {
+            { NetKeys.ROOM_OWNER_USERID, PhotonNetwork.LocalPlayer.UserId },
+            { NetKeys.ROOM_CREATED_AT, System.DateTime.Now.Ticks },
+            { NetKeys.ROOM_SAVED_JSON, LocalRoomStorage.ToJson(data) },
+            { NetKeys.ROOM_CLAIMS_JSON, "" },
+            { NetKeys.ROOM_SAVE_ID, data.saveId } // YENÝ: kaydýn kimliðini odaya yaz
+        },
             CustomRoomPropertiesForLobby = new string[] { NetKeys.ROOM_OWNER_USERID, NetKeys.ROOM_CREATED_AT }
         };
 
         bool ok = PhotonNetwork.CreateRoom(data.roomCode, options, TypedLobby.Default);
         if (!ok)
         {
-            // Oda adý dolu olabilir: farklý adla tekrar dene
             string altName = $"{data.roomCode}_{Random.Range(100, 999)}";
             PhotonNetwork.CreateRoom(altName, options, TypedLobby.Default);
         }
@@ -173,10 +187,9 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
         _pendingData = null;
     }
 
-    // === PUN CALLBACKS ===
+    // ===== PUN =====
     public override void OnConnectedToMaster()
     {
-        // Burada JoinLobby çaðýrmayalým; NetworkManager zaten çaðýrýyor.
         UpdateOpenBtnState();
     }
 
@@ -196,9 +209,10 @@ public class SavedRoomsUI : MonoBehaviourPunCallbacks
         UpdateOpenBtnState();
     }
 
+
+
     public override void OnLeftRoom()
     {
-        // Odadan çýkýnca lobiye dön; pending varsa devam et
         if (PhotonNetwork.IsConnected)
         {
             if (!PhotonNetwork.InLobby && PhotonNetwork.NetworkClientState != ClientState.JoiningLobby)

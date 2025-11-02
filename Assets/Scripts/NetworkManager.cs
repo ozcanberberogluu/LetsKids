@@ -70,10 +70,16 @@ public class NetworkManager : MonoBehaviourPunCallbacks
 
     // ===== PUN Callbacks =====
     public override void OnConnectedToMaster()
-    {
-        PhotonNetwork.AutomaticallySyncScene = true;
-        PhotonNetwork.JoinLobby(); // Oda kur/katýl için þart
-    }
+{
+    PhotonNetwork.AutomaticallySyncScene = true;
+
+    // YENÝ: userId'yi kalýcý tut
+    if (PhotonNetwork.LocalPlayer != null && !string.IsNullOrEmpty(PhotonNetwork.LocalPlayer.UserId))
+        PlayerPrefs.SetString("lastUserId", PhotonNetwork.LocalPlayer.UserId);
+
+    PhotonNetwork.JoinLobby();
+}
+
 
     public override void OnJoinedLobby()
     {
