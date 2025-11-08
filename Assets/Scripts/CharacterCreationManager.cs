@@ -17,20 +17,24 @@ public class Stats
     public int defn = 7;
     public int atkspd = 5;
     public int hp = 80;
+    public float jump = 1.6f; // YENÝ: Jump height (m)
 
-    public Dictionary<string, int> ToDict() => new Dictionary<string, int> {
-        {"spd",spd},{"pow",pow},{"def",defn},{"atkspd",atkspd},{"hp",hp}
+    public Dictionary<string, object> ToDict() => new Dictionary<string, object> {
+        {"spd",spd},{"pow",pow},{"def",defn},{"atkspd",atkspd},{"hp",hp},{"jump",jump}
     };
+
     public static Stats FromDict(Dictionary<string, object> d)
     {
-        return new Stats
-        {
-            spd = Convert.ToInt32(d["spd"]),
-            pow = Convert.ToInt32(d["pow"]),
-            defn = Convert.ToInt32(d["def"]),
-            atkspd = Convert.ToInt32(d["atkspd"]),
-            hp = Convert.ToInt32(d["hp"])
-        };
+        var s = new Stats();
+        if (d == null) return s;
+
+        s.spd = d.ContainsKey("spd") ? Convert.ToInt32(d["spd"]) : s.spd;
+        s.pow = d.ContainsKey("pow") ? Convert.ToInt32(d["pow"]) : s.pow;
+        s.defn = d.ContainsKey("def") ? Convert.ToInt32(d["def"]) : s.defn;
+        s.atkspd = d.ContainsKey("atkspd") ? Convert.ToInt32(d["atkspd"]) : s.atkspd;
+        s.hp = d.ContainsKey("hp") ? Convert.ToInt32(d["hp"]) : s.hp;
+        s.jump = d.ContainsKey("jump") ? Convert.ToSingle(d["jump"]) : s.jump; // eksikse 1.6
+        return s;
     }
 }
 
@@ -45,6 +49,11 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     [Header("Stat UI")]
     public TMP_Text spdText, powText, defText, atkspdText, hpText;
     public Button spdPlus, powPlus, defPlus, atkspdPlus, hpPlus;
+
+    [Header("Jump UI (opsiyonel baðla)")]
+    public TMP_Text jumpText;        // “1.6” gibi gösterir
+    public Button jumpPlus;          // havuzdan puan harcar
+    public float jumpStep = 0.2f;    // 1 puan = 0.2m
 
     public Button readyBtn;
 
@@ -82,20 +91,13 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
     void OnEnable() { PhotonNetwork.AddCallbackTarget(this); }
     void OnDisable() { PhotonNetwork.RemoveCallbackTarget(this); }
 
-    void Start()
-    {
-        // GECÝKMELÝ BAÞLATMA: InRoom deðilsek bekle
-        TryInit();
-    }
+    void Start() { TryInit(); }
 
     void TryInit()
     {
         if (_initialized) return;
 
-        if (PhotonNetwork.InRoom)
-        {
-            Init();
-        }
+        if (PhotonNetwork.InRoom) Init();
         else
         {
             if (_waitJoinCo != null) StopCoroutine(_waitJoinCo);
@@ -105,7 +107,6 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
     System.Collections.IEnumerator WaitUntilInRoom()
     {
-        // bekle: baðlanýyor/joining olabilir
         while (!PhotonNetwork.InRoom) yield return null;
         Init();
     }
@@ -121,10 +122,10 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
 
         var p = PhotonNetwork.LocalPlayer;
 
-        // Reset state (rejoin dahil)
+        // Reset state
         gender = "M";
         nameInput.text = p != null ? p.NickName : "";
-        localStats = new Stats();
+        localStats = new Stats(); // jump = 1.6 default
         poolPoints = 10;
 
         var htInit = new ExitGames.Client.Photon.Hashtable
@@ -142,7 +143,6 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         RefreshOwnerControls();
         UpdateStartButton();
 
-        // Saved snapshot varsa listele
         LoadSavedSnapshotFromRoom();
         RenderSavedList();
         AutoClaimIfOwned();
@@ -160,6 +160,9 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         defPlus.onClick.AddListener(() => TryAdd(ref localStats.defn));
         atkspdPlus.onClick.AddListener(() => TryAdd(ref localStats.atkspd));
         hpPlus.onClick.AddListener(() => TryAdd(ref localStats.hp));
+
+        if (jumpPlus != null) // UI baðlanmadýysa sorun olmasýn
+            jumpPlus.onClick.AddListener(() => TryAddJump());
 
         readyBtn.onClick.AddListener(() =>
         {
@@ -235,6 +238,15 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         PushProperties();
     }
 
+    void TryAddJump()
+    {
+        if (poolPoints <= 0) return;
+        localStats.jump = Mathf.Round((localStats.jump + jumpStep) * 100f) / 100f; // 2 hane
+        poolPoints -= 1;
+        UpdateLocalUI();
+        PushProperties();
+    }
+
     void UpdateLocalUI()
     {
         spdText.text = localStats.spd.ToString();
@@ -242,13 +254,15 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         defText.text = localStats.defn.ToString();
         atkspdText.text = localStats.atkspd.ToString();
         hpText.text = localStats.hp.ToString();
+        if (jumpText != null) jumpText.text = localStats.jump.ToString("0.0");
+
         remainingPointsText.text = $"Kalan Puan: {poolPoints}";
         readyBtn.interactable = poolPoints == 0;
     }
 
     void PushProperties()
     {
-        if (!PhotonNetwork.InRoom) return; // <-- KRÝTÝK: InRoom deðilken çaðýrma
+        if (!PhotonNetwork.InRoom) return;
         var dict = localStats.ToDict();
         string json = MiniJson.Serialize(dict);
 
@@ -387,9 +401,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         {
             var ui = _savedItems[i];
             if (!claims.TryGetValue(i, out var by) || string.IsNullOrEmpty(by))
-            {
                 ui.SetStateFree();
-            }
             else
             {
                 if (by == PhotonNetwork.LocalPlayer.UserId) ui.SetStateMine();
@@ -489,11 +501,7 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         }
     }
 
-    // Odaya sonradan girenler için: InRoom olunca tekrar Init denemesi
-    public override void OnJoinedRoom()
-    {
-        TryInit();
-    }
+    public override void OnJoinedRoom() { TryInit(); }
 
     void GoToMainMenu()
     {
@@ -504,8 +512,5 @@ public class CharacterCreationManager : MonoBehaviourPunCallbacks, IOnEventCallb
         else SceneManager.LoadScene("MainMenu");
     }
 
-    public override void OnLeftRoom()
-    {
-        SceneManager.LoadScene("MainMenu");
-    }
+    public override void OnLeftRoom() { SceneManager.LoadScene("MainMenu"); }
 }

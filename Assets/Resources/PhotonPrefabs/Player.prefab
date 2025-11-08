@@ -3613,6 +3613,7 @@ GameObject:
   - component: {fileID: 5389482535929703076}
   - component: {fileID: 4879561306042615372}
   - component: {fileID: 4149935239378680651}
+  - component: {fileID: 7248018238289894443}
   m_Layer: 0
   m_Name: Player
   m_TagString: Untagged
@@ -3758,6 +3759,9 @@ MonoBehaviour:
   acceleration: 30
   turnSpeed: 1080
   gravity: -20
+  enableJump: 1
+  jumpHeight: 1.6
+  airControl: 0.6
   rotateRoot: 0
   rotateCharactersChild: 1
   cameraPivot: {fileID: 0}
@@ -3771,6 +3775,28 @@ MonoBehaviour:
   zoomSpeed: 6
   zoomLerp: 100
   anim: {fileID: 0}
+--- !u!114 &7248018238289894443
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 5010609017968160519}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 16c48c4c8fb57574db53f07a614cc97e, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  spd: 0
+  pow: 0
+  defn: 0
+  atkspd: 0
+  hp: 0
+  jump: 1.6
+  baseMoveSpeed: 2.8
+  spdToSpeed: 0.25
+  minMoveSpeed: 2.5
+  maxMoveSpeed: 8
 --- !u!1 &5156223256890574723
 GameObject:
   m_ObjectHideFlags: 0
