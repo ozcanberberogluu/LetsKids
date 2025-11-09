@@ -1,69 +1,188 @@
-using UnityEngine;
+ï»¿using UnityEngine;
 using Photon.Pun;
 
 public class PlayerCombat : MonoBehaviourPun
 {
+    [Header("TEST MODE")]
+    [Tooltip("True ise tÃ¼m slotlar aktif olur, 1-2-3-4 ile silah seÃ§ilir, sol tÄ±kla seÃ§ili silahÄ±n attack animi oynar.")]
+    public bool testEnableAllSlots = false;
+
+    [Header("Weapon")]
     public WeaponType currentWeapon = WeaponType.None;
 
+    [Header("Attack Timing")]
+    public float baseCooldown = 0.8f;   // temel bekleme
+    public float atkspdScale = 0.06f;  // cooldown = base / (1 + atkspd*scale)
+    public float minCooldown = 0.15f;  // alt sÄ±nÄ±r
+
+    [Header("Animator Params")]
+    public string animParam_Attack = "Attack";
+    public string animParam_AttackSpeed = "AttackSpeed"; // varsa multiplier
+    // Weapon int param adÄ±nÄ± otomatik bulacaÄŸÄ±z:
+    string animParam_WeaponInt = null;
+
     Animator anim;
-    Transform cachedModel; // aktif model (ManBabylv1 / WomanBabylv1 gibi)
+    Transform cachedModel;
+
+    PlayerStats stats;
+    PlayerMovementController mover;
+    PlayerEquipmentUI equipmentUI;
+
+    float nextAttackTime;
 
     void Awake()
     {
+        stats = GetComponent<PlayerStats>();
+        mover = GetComponent<PlayerMovementController>();
+        equipmentUI = GetComponent<PlayerEquipmentUI>();
         RebindAnimator();
     }
 
-    // Aktif modeli/animatörü yeniden bul (gender deðiþtiðinde çaðýr)
-    public void RebindAnimator()
+    void Start()
     {
-        // aktif model (Characters altýnda aktif olan çocuk)
-        cachedModel = GetActiveModelTransform();
-        anim = GetComponentInChildren<Animator>(true); // çocuklarda ara
-
-        // Güvenlik: Hâlâ bulamazsa bir sonraki frameda tekrar dene
-        if (anim == null) Invoke(nameof(RebindAnimator), 0.1f);
-    }
-
-    Transform GetActiveModelTransform()
-    {
-        // Senin hiyerarþine göre ayarladým
-        var chars = transform.Find("Characters");
-        if (!chars) return null;
-        foreach (Transform child in chars)
+        // Test modunda tÃ¼m slotlarÄ± aÃ§
+        if (photonView.IsMine && testEnableAllSlots && equipmentUI)
         {
-            // Man / Woman klasörü içindeki aktif olaný bul
-            foreach (Transform model in child)
-                if (model.gameObject.activeInHierarchy) return model;
+            equipmentUI.AcquireWeapon(WeaponType.Sword);
+            equipmentUI.AcquireWeapon(WeaponType.Bow);
+            equipmentUI.AcquireWeapon(WeaponType.Staff);
         }
-        return null;
     }
 
     void Update()
     {
         if (!photonView.IsMine) return;
 
-        // Model/animator runtime’da deðiþmiþse otomatik yeniden baðla
         if (anim == null || (cachedModel && !cachedModel.gameObject.activeInHierarchy))
             RebindAnimator();
 
+        // TEST: 1-2-3-4 ile slot seÃ§imi
+        if (testEnableAllSlots)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1)) SelectWeapon(WeaponType.None);
+            if (Input.GetKeyDown(KeyCode.Alpha2)) SelectWeapon(WeaponType.Sword);
+            if (Input.GetKeyDown(KeyCode.Alpha3)) SelectWeapon(WeaponType.Bow);
+            if (Input.GetKeyDown(KeyCode.Alpha4)) SelectWeapon(WeaponType.Staff);
+        }
+
         if (Input.GetMouseButtonDown(0))
-            photonView.RPC(nameof(RpcAttack), RpcTarget.All, (int)currentWeapon);
+            TryAttack();
+    }
+
+    // === Attack ===
+    void TryAttack()
+    {
+        if (mover && !mover.MoveEnabled) return;
+
+        float cd = ComputeCooldown();
+        if (Time.time < nextAttackTime) return;
+        nextAttackTime = Time.time + cd;
+
+        PlayAttackAnimLocal(currentWeapon, cd);
+        photonView.RPC(nameof(RpcAttack), RpcTarget.Others, (int)currentWeapon, cd);
+    }
+
+    float ComputeCooldown()
+    {
+        int atk = stats ? stats.atkspd : 0;
+        float scaled = baseCooldown / Mathf.Max(1f, (1f + atk * atkspdScale));
+        return Mathf.Max(minCooldown, scaled);
+    }
+
+    void PlayAttackAnimLocal(WeaponType weapon, float cd)
+    {
+        if (!anim) return;
+
+        if (!string.IsNullOrEmpty(animParam_AttackSpeed) && HasParam(animParam_AttackSpeed))
+            anim.SetFloat(animParam_AttackSpeed, (baseCooldown / Mathf.Max(cd, 0.0001f)));
+
+        SetWeaponIntOnAnimator((int)weapon);
+        anim.ResetTrigger(animParam_Attack);
+        anim.SetTrigger(animParam_Attack);
     }
 
     [PunRPC]
-    void RpcAttack(int weapon)
+    void RpcAttack(int weapon, float cd)
     {
-        if (!anim) return;
-        anim.ResetTrigger("Attack");
-        anim.SetInteger("WeaponType", weapon);
-        anim.SetTrigger("Attack");
+        currentWeapon = (WeaponType)weapon;
+        PlayAttackAnimLocal(currentWeapon, cd);
     }
 
-    // Ýleride loot ile çaðýracaksýn
-    public void Equip(WeaponType newType)
+    // === Weapon switching ===
+    public void SelectWeapon(WeaponType newType)
     {
         if (!photonView.IsMine) return;
-        currentWeapon = newType;
-        // burada silah modelini aç/kapa için ayrýca bir RPC düþüneriz
+        SetWeaponLocal(newType);
+        photonView.RPC(nameof(RpcSetWeapon), RpcTarget.Others, (int)newType);
     }
+
+    void SetWeaponLocal(WeaponType newType)
+    {
+        currentWeapon = newType;
+        SetWeaponIntOnAnimator((int)currentWeapon);
+        // Debug
+        Debug.Log($"[Combat] SetWeapon â†’ {currentWeapon} (animParam='{animParam_WeaponInt}')", this);
+    }
+
+    [PunRPC]
+    void RpcSetWeapon(int newType)
+    {
+        currentWeapon = (WeaponType)newType;
+        SetWeaponIntOnAnimator((int)currentWeapon);
+    }
+
+    // === Animator binding ===
+    public void RebindAnimator()
+    {
+        cachedModel = GetActiveModelTransform();
+        anim = GetComponentInChildren<Animator>(true);
+
+        // Param adÄ±nÄ± otomatik keÅŸfet
+        animParam_WeaponInt = DetectWeaponIntParam();
+        if (anim != null && animParam_WeaponInt != null)
+            anim.SetInteger(animParam_WeaponInt, (int)currentWeapon);
+        else
+            Debug.LogWarning("[Combat] Weapon int param bulunamadÄ±! ('WeaponT' / 'WeaponType' / 'WeaponTyp')", this);
+    }
+
+    string DetectWeaponIntParam()
+    {
+        if (!anim) return null;
+        // Adaylar: kod + Animator koÅŸullarÄ±nda gÃ¶rÃ¼nen isimler
+        string[] cands = { "WeaponT", "WeaponType", "WeaponTyp" };
+        foreach (var p in anim.parameters)
+        {
+            if (p.type != AnimatorControllerParameterType.Int) continue;
+            foreach (var c in cands)
+                if (p.name == c) return p.name;
+        }
+        return null;
+    }
+
+    void SetWeaponIntOnAnimator(int value)
+    {
+        if (anim == null) return;
+        if (animParam_WeaponInt == null) animParam_WeaponInt = DetectWeaponIntParam();
+        if (animParam_WeaponInt != null) anim.SetInteger(animParam_WeaponInt, value);
+    }
+
+    Transform GetActiveModelTransform()
+    {
+        var chars = transform.Find("Characters");
+        if (!chars) return null;
+        foreach (Transform g in chars)
+            foreach (Transform model in g)
+                if (model.gameObject.activeInHierarchy) return model;
+        return null;
+    }
+
+    bool HasParam(string p)
+    {
+        if (!anim || string.IsNullOrEmpty(p)) return false;
+        foreach (var prm in anim.parameters)
+            if (prm.name == p) return true;
+        return false;
+    }
+
+    public void Equip(WeaponType newType) => SelectWeapon(newType);
 }
